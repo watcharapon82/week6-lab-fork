@@ -2,7 +2,15 @@ package store
 
 import (
 	"context"
+	"errors"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
+)
+
+var (
+	ErrDuplicate = errors.New("duplicate")
+	ErrNoMovie   = errors.New("movie not found")
 )
 
 type ReviewAuthor struct {
@@ -45,4 +53,36 @@ func (s *Store) ListReviews(ctx context.Context, movieID int64) ([]Review, error
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+func (s *Store) AddReview(ctx context.Context, memberID, movieID int64, text string) (Review, error) {
+	r := Review{MemberID: memberID, MovieID: movieID, Text: text}
+	err := s.Pool.QueryRow(ctx,
+		`INSERT INTO reviews (member_id, movie_id, text)
+         VALUES ($1, $2, $3)
+         RETURNING id, created_at, updated_at`, memberID, movieID, text).
+		Scan(&r.ID, &r.CreatedAt, &r.UpdatedAt)
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		switch pgErr.Code {
+		case "23505": // ผิดกติกาห้ามซ้ำ
+			return Review{}, ErrDuplicate
+		case "23503": // ผิดกติกาคีย์นอก หนังไม่มีจริง
+			return Review{}, ErrNoMovie
+		}
+	}
+	return r, err
+}
+
+// DeleteReview ลบได้เมื่อเป็นเจ้าของรีวิว หรือเป็นแอดมิน
+func (s *Store) DeleteReview(ctx context.Context, reviewID, memberID int64, isAdmin bool) error {
+	tag, err := s.Pool.Exec(ctx,
+		`DELETE FROM reviews
+		 WHERE id = $1 AND (member_id = $2 OR $3)`, reviewID, memberID, isAdmin)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
